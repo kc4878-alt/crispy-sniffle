@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#10131a">
+<title>AI 人物辨識練習器</title>
+<style>
+:root{color-scheme:dark;--bg:#10131a;--panel:#1b202b;--text:#f4f6fb;--muted:#aab3c5;--accent:#6ee7b7;--line:#343c4d}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+main{max-width:760px;margin:auto;padding:18px 14px 34px}
+h1{font-size:24px;margin:8px 0}p{line-height:1.5;color:var(--muted)}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:14px;margin:14px 0}
+.stage{position:relative;width:100%;background:#05070a;border-radius:12px;overflow:hidden;aspect-ratio:3/4;max-height:68vh}
+video,canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+canvas{pointer-events:none}
+.controls{display:flex;flex-wrap:wrap;gap:9px;margin-top:12px}
+button{border:0;border-radius:12px;padding:12px 14px;font-size:15px;font-weight:650;background:var(--accent);color:#082019;min-height:44px}
+button.secondary{background:#303849;color:var(--text)}button:disabled{opacity:.45}
+.status{font-size:14px;padding:10px 12px;border-radius:10px;background:#111722;color:var(--muted);margin-top:10px}
+.statrow{display:flex;justify-content:space-between;gap:10px;margin-top:8px;font-size:14px}
+small{color:var(--muted);line-height:1.5;display:block}
+input[type=range]{width:100%;accent-color:var(--accent)}
+label{display:block;margin-top:14px;font-size:14px}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<main>
+  <h1>AI 人物辨識練習器</h1>
+  <p>在 iPhone 瀏覽器辨識相機畫面中的人物，顯示框線、中心點與信心分數。這是獨立練習工具，不會連接或控制任何遊戲。</p>
+  <section class="panel">
+    <div class="stage">
+      <video id="video" playsinline muted></video>
+      <canvas id="overlay"></canvas>
+    </div>
+    <div class="controls">
+      <button id="start">啟動相機與 AI</button>
+      <button id="stop" class="secondary" disabled>停止</button>
+      <button id="flip" class="secondary" disabled>切換鏡頭</button>
+    </div>
+    <div id="status" class="status">尚未啟動。請在 HTTPS 網址中開啟，並允許相機權限。</div>
+    <div class="statrow"><span>辨識到的人物</span><strong id="count">0</strong></div>
+    <label for="threshold">最低信心分數：<strong id="thresholdText">50%</strong></label>
+    <input id="threshold" type="range" min="10" max="90" step="5" value="50">
+  </section>
+  <section class="panel">
+    <strong>使用方式</strong>
+    <p>1. 點「啟動相機與 AI」並允許相機權限。<br>2. 將人物放進鏡頭畫面。<br>3. 綠色框線代表模型辨識到的人物；圓點是人物框的中心位置。</p>
+    <small>模型會從網路載入，第一次啟動需要網路。辨識結果會受光線、遮擋與鏡頭影響。本頁不會主動上傳相機畫面，但模型檔案由第三方 CDN 載入。請勿用於監視或辨識特定個人。</small>
+  </section>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.20.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+const video=document.getElementById('video'), canvas=document.getElementById('overlay'), ctx=canvas.getContext('2d');
+const startBtn=document.getElementById('start'), stopBtn=document.getElementById('stop'), flipBtn=document.getElementById('flip');
+const statusEl=document.getElementById('status'), countEl=document.getElementById('count'), threshold=document.getElementById('threshold'), thresholdText=document.getElementById('thresholdText');
+let model=null, stream=null, running=false, facing='environment', busy=false, raf=null;
+function status(s){statusEl.textContent=s}
+function resizeCanvas(){const r=video.getBoundingClientRect();canvas.width=Math.max(1,Math.round(r.width*devicePixelRatio));canvas.height=Math.max(1,Math.round(r.height*devicePixelRatio));}
+function draw(predictions){
+  const vw=video.videoWidth, vh=video.videoHeight, cw=canvas.width, ch=canvas.height;
+  ctx.clearRect(0,0,cw,ch); if(!vw||!vh)return;
+  const scale=Math.min(cw/vw,ch/vh), dw=vw*scale, dh=vh*scale, ox=(cw-dw)/2, oy=(ch-dh)/2;
+  const minScore=Number(threshold.value)/100; let n=0;
+  for(const p of predictions){
+    if(p.class!=='person'||p.score<minScore)continue;
+    n++; const [x,y,w,h]=p.bbox;
+    const X=ox+x*scale,Y=oy+y*scale,W=w*scale,H=h*scale;
+    ctx.lineWidth= Math.max(2,2*devicePixelRatio);ctx.strokeStyle='#6ee7b7';ctx.strokeRect(X,Y,W,H);
+    ctx.fillStyle='#6ee7b7';ctx.font=`${Math.max(12,13*devicePixelRatio)}px -apple-system, sans-serif`;
+    const label=`人物 ${Math.round(p.score*100)}%`, tw=ctx.measureText(label).width;
+    ctx.fillRect(X,Y-Math.max(24,25*devicePixelRatio),tw+12*devicePixelRatio,Math.max(24,25*devicePixelRatio));
+    ctx.fillStyle='#082019';ctx.fillText(label,X+6*devicePixelRatio,Y-7*devicePixelRatio);
+    const cx=X+W/2,cy=Y+H/2;ctx.beginPath();ctx.arc(cx,cy,4*devicePixelRatio,0,Math.PI*2);ctx.fillStyle='#ffdb70';ctx.fill();
+  }
+  countEl.textContent=String(n);
+}
+async function loop(){
+  if(!running||busy)return;
+  if(video.readyState>=2&&model){
+    busy=true;
+    try{const preds=await model.detect(video);draw(preds)}catch(e){status('辨識發生問題：'+e.message)}
+    busy=false;
+  }
+  if(running)raf=requestAnimationFrame(loop);
+}
+async function start(){
+  startBtn.disabled=true;
+  try{
+    if(!window.isSecureContext){throw new Error('相機需要 HTTPS 網址。請將此頁部署到 HTTPS 網站後再開啟。')}
+    status('正在載入 AI 模型…');
+    if(!window.cocoSsd||!window.tf)throw new Error('AI 模型載入失敗，請確認網路後重新整理。');
+    if(!model)model=await cocoSsd.load({base:'lite_mobilenet_v2'});
+    status('正在請求相機權限…');
+    stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:1280},height:{ideal:720}},audio:false});
+    video.srcObject=stream; await video.play();
+    resizeCanvas(); running=true;stopBtn.disabled=false;flipBtn.disabled=false;
+    status('辨識中。請將人物放入鏡頭畫面。');loop();
+  }catch(e){status('無法啟動：'+e.message);startBtn.disabled=false;stopBtn.disabled=true}
+}
+function stop(){
+  running=false;if(raf)cancelAnimationFrame(raf);if(stream)stream.getTracks().forEach(t=>t.stop());
+  stream=null;video.srcObject=null;ctx.clearRect(0,0,canvas.width,canvas.height);countEl.textContent='0';
+  startBtn.disabled=false;stopBtn.disabled=true;flipBtn.disabled=true;status('已停止相機。');
+}
+startBtn.addEventListener('click',start);stopBtn.addEventListener('click',stop);
+flipBtn.addEventListener('click',async()=>{facing=facing==='environment'?'user':'environment';stop();await start()});
+threshold.addEventListener('input',()=>{thresholdText.textContent=threshold.value+'%'});
+window.addEventListener('resize',resizeCanvas);
+document.addEventListener('visibilitychange',()=>{if(document.hidden&&running)stop()});
+</script>
+</body>
+</html>
